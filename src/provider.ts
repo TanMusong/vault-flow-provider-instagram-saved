@@ -65,8 +65,6 @@ export class InstagramSavedProvider implements VaultProvider {
       return {
         success: true,
         name: result.username,
-        userId: result.userId,
-        interval: (params.interval as number) || 1800,
       };
     } catch (err) {
       return { success: false, message: (err as Error).message };
