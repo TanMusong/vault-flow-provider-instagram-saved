@@ -39,6 +39,7 @@ export class InstagramSavedProvider implements VaultProvider {
       return { success: false, message: 'Cookies are required' };
     }
     ctx.storage.set(STORAGE_KEY_COOKIES, cookies);
+    if (params.downloadPath) ctx.storage.set('downloadPath', params.downloadPath as string);
 
     let browser: Browser | null = null;
     let page: Page | null = null;
@@ -229,8 +230,10 @@ export class InstagramSavedProvider implements VaultProvider {
       ctx.addLog('info', `Collected ${items.length} items`);
 
       // Phase 2: Download all items
+      ctx.emitTaskProgress(0, items.length);
       let downloaded = 0, failed = 0;
       for (let i = 0; i < items.length; i++) {
+        ctx.emitTaskProgress(i, items.length);
         const item = items[i];
         if (ctx.hasSuccessfulDownloadRecord(item.id)) {
           if (item.bookmarked) await handleUnsave(item);
@@ -250,7 +253,12 @@ export class InstagramSavedProvider implements VaultProvider {
         }
         try {
           const files: DownloadFile[] = [];
-          const userDir = ctx.path.join(ctx.downloadDir, 'instagram', handle, item.authorId || 'unknown');
+          const downloadPathTemplate = ctx.storage.get<string>('downloadPath') || '{type}/{user}/{author_id}_{author}';
+          const vars: Record<string, string> = {
+            type: 'instagram', user: handle,
+            author: item.author || 'unknown', author_id: item.authorId || 'unknown'
+          };
+          const userDir = ctx.path.join(ctx.downloadDir, downloadPathTemplate.replace(/\{(\w+)\}/g, (_, k) => vars[k] || k));
           if (!ctx.fs.existsSync(userDir)) ctx.fs.mkdirSync(userDir, { recursive: true });
           for (const dl of mediaUrls) {
             files.push({ type: dl.type, filename: dl.filename, url: dl.urls[0] || '', fileSize: 0, fileExpectedSize: 0, fileStatus: FileStatus.Downloading });
