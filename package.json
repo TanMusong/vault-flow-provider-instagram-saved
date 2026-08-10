@@ -1,6 +1,6 @@
 {
   "name": "@vault-flow/provider-instagram-saved",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Vault Flow provider for Instagram saved posts download",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
