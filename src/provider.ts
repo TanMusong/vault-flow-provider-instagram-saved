@@ -249,7 +249,7 @@ export class InstagramSavedProvider implements VaultProvider {
         }
         try {
           const files: DownloadFile[] = [];
-          const userDir = ctx.path.join(ctx.configDir, 'downloads', handle, item.authorId || 'unknown');
+          const userDir = ctx.path.join(ctx.downloadDir, 'instagram', handle, item.authorId || 'unknown');
           if (!ctx.fs.existsSync(userDir)) ctx.fs.mkdirSync(userDir, { recursive: true });
           for (const dl of mediaUrls) {
             files.push({ type: dl.type, filename: dl.filename, url: dl.urls[0] || '', fileSize: 0, fileExpectedSize: 0, fileStatus: FileStatus.Downloading });
