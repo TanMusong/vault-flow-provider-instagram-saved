@@ -1,4 +1,4 @@
-import type { VaultProvider, ProviderContext, DownloadFile, AddTaskParams, AddTaskResponse, ProviderResult, TaskResult } from '@vault-flow/provider-api';
+import type { VaultProvider, ProviderContext, DownloadFile, AddTaskResult, DeleteTaskResult, ExecuteTaskResult, TaskErrorResult } from '@vault-flow/provider-api';
 import { MediaType, FileStatus, DownloadStatus, TaskState } from '@vault-flow/provider-api';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -13,15 +13,15 @@ const STORAGE_KEY_COOKIES = 'cookies';
 export class InstagramSavedProvider implements VaultProvider {
   constructor() {}
 
-  private async launchBrowser(ctx: ProviderContext): Promise<{ browser: Browser; page: Page }> {
+  private async launchBrowser(ctx: ProviderContext, cookies?: string): Promise<{ browser: Browser; page: Page }> {
     const browser = await puppeteer.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     }) as Browser;
-    const cookies = ctx.storage.get<string>(STORAGE_KEY_COOKIES) || '';
+    const cookieStr = cookies || (ctx.config.cookies as string) || '';
     const page = await browser.newPage();
-    if (cookies) {
-      const cookiePairs = cookies.split(';').map(c => c.trim()).filter(Boolean);
+    if (cookieStr) {
+      const cookiePairs = cookieStr.split(';').map(c => c.trim()).filter(Boolean);
       const cookieObjects = cookiePairs.map(pair => {
         const [name, ...valueParts] = pair.split('=');
         return { name: name.trim(), value: valueParts.join('='), domain: '.instagram.com', path: '/' };
@@ -33,34 +33,32 @@ export class InstagramSavedProvider implements VaultProvider {
     return { browser, page };
   }
 
-  async addTask(ctx: ProviderContext, params: AddTaskParams): Promise<AddTaskResponse> {
-    const cookies = params.cookies as string || ctx.storage.get<string>(STORAGE_KEY_COOKIES) || '';
+  private msg(locale: string, key: string, fallback: string): string {
+    const messages: Record<string, Record<string, string>> = {
+      'cookie_required': { 'zh-CN': '请填写 Cookie', 'zh-TW': '請填寫 Cookie', 'en-US': 'Cookies are required' },
+      'login_failed': { 'zh-CN': 'Instagram 登录失败，请检查 Cookie', 'zh-TW': 'Instagram 登入失敗，請檢查 Cookie', 'en-US': 'Invalid cookies or login failed' },
+      'login_expired': { 'zh-CN': 'Instagram 登录已过期', 'zh-TW': 'Instagram 登入已過期', 'en-US': 'Instagram login expired' },
+    };
+    const m = messages[key];
+    return m ? (m[locale] || m['en-US'] || fallback) : fallback;
+  }
+
+  async addTask(ctx: ProviderContext): Promise<AddTaskResult | TaskErrorResult> {
+    const cookies = (ctx.config.cookies as string) || '';
     if (!cookies) {
-      return { success: false, message: 'Cookies are required' };
+      return { success: false, message: this.msg(ctx.locale, 'cookie_required', 'Cookies are required') };
     }
-    ctx.storage.set(STORAGE_KEY_COOKIES, cookies);
-    if (params.downloadPath) ctx.storage.set('downloadPath', params.downloadPath as string);
 
     let browser: Browser | null = null;
     let page: Page | null = null;
     try {
-      browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      }) as Browser;
-      page = await browser!.newPage();
-      const cookiePairs = cookies.split(';').map(c => c.trim()).filter(Boolean);
-      const cookieObjects = cookiePairs.map(pair => {
-        const [name, ...valueParts] = pair.split('=');
-        return { name: name.trim(), value: valueParts.join('='), domain: '.instagram.com', path: '/' };
-      }).filter(c => c.name);
-      if (cookieObjects.length > 0) {
-        await page.setCookie(...cookieObjects);
-      }
+      const launched = await this.launchBrowser(ctx, cookies);
+      browser = launched.browser;
+      page = launched.page;
 
       const result = await this.checkLogin(page);
       if (!result.username) {
-        return { success: false, message: 'Invalid cookies or login failed' };
+        return { success: false, message: this.msg(ctx.locale, 'login_failed', 'Invalid cookies or login failed') };
       }
 
       return {
@@ -71,16 +69,20 @@ export class InstagramSavedProvider implements VaultProvider {
       return { success: false, message: (err as Error).message };
     } finally {
       if (page) await page.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
+      if (browser) {
+        await Promise.race([
+          browser.close(),
+          new Promise<void>(r => setTimeout(() => { try { (browser as any).process()?.kill(); } catch {} r(); }, 10000)),
+        ]).catch(() => {});
+      }
     }
   }
 
-  async deleteTask(ctx: ProviderContext, taskId: string): Promise<ProviderResult> {
-    const hasDownloads = ctx.hasPostDownloadRecord(taskId);
-    if (hasDownloads) {
-      return { success: false, message: 'Task has associated downloads' };
-    }
-    ctx.storage.clear();
+  async deleteTask(ctx: ProviderContext, taskId: string): Promise<DeleteTaskResult | TaskErrorResult> {
+    return { success: true };
+  }
+
+  async onTaskConfigUpdate(_ctx: ProviderContext, _taskId: string): Promise<DeleteTaskResult> {
     return { success: true };
   }
 
@@ -186,7 +188,7 @@ export class InstagramSavedProvider implements VaultProvider {
     }
   }
 
-  async executeTask(ctx: ProviderContext): Promise<TaskResult> {
+  async executeTask(ctx: ProviderContext): Promise<ExecuteTaskResult> {
     const startTime = Date.now();
     console.log(`[instagram] executeTask: ${ctx.taskId}`);
 
@@ -202,7 +204,7 @@ export class InstagramSavedProvider implements VaultProvider {
 
       if (!userId) {
         ctx.addLog('warn', 'Instagram login expired');
-        return { state: TaskState.LoginExpired, message: 'status.login_expired', downloaded: 0, failed: 0, total: 0, duration: Date.now() - startTime };
+        return { state: TaskState.LoginExpired, message: this.msg(ctx.locale, 'login_expired', 'Instagram login expired'), downloaded: 0, failed: 0, total: 0, duration: Date.now() - startTime };
       }
       ctx.addLog('info', `Instagram login OK: ${username} (${userId})`);
 
@@ -253,7 +255,7 @@ export class InstagramSavedProvider implements VaultProvider {
         }
         try {
           const files: DownloadFile[] = [];
-          const downloadPathTemplate = ctx.storage.get<string>('downloadPath') || '{type}/{user}/{author_id}_{author}';
+          const downloadPathTemplate = (ctx.config.downloadPath as string) || '{type}/{user}/{author_id}_{author}';
           const vars: Record<string, string> = {
             type: 'instagram', user: handle,
             author: item.author || 'unknown', author_id: item.authorId || 'unknown'
@@ -269,7 +271,7 @@ export class InstagramSavedProvider implements VaultProvider {
             files, dataJson: { detailUrl: item.detailUrl, raw: item.raw }
           });
 
-          const cookies = ctx.storage.get<string>(STORAGE_KEY_COOKIES) || '';
+          const cookies = (ctx.config.cookies as string) || '';
           for (const dl of mediaUrls) {
             for (const url of dl.urls) {
               try {
@@ -283,8 +285,7 @@ export class InstagramSavedProvider implements VaultProvider {
                 if (response.ok) {
                   const buffer = await response.arrayBuffer();
                   const dest = ctx.path.join(userDir, dl.filename);
-                  const nodeFs = require('fs');
-                  nodeFs.writeFileSync(dest, Buffer.from(buffer));
+                  ctx.fs.writeFileSync(dest, Buffer.from(buffer) as unknown as string);
                   const fi = files.findIndex(f => f.filename === dl.filename);
                   if (fi >= 0) {
                     files[fi].fileSize = buffer.byteLength;
@@ -337,7 +338,12 @@ export class InstagramSavedProvider implements VaultProvider {
       return { state: TaskState.Error, message: (err as Error).message, downloaded: 0, failed: 0, total: 0, duration: Date.now() - startTime };
     } finally {
       if (page) await page.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
+      if (browser) {
+        await Promise.race([
+          browser.close(),
+          new Promise<void>(r => setTimeout(() => { try { (browser as any).process()?.kill(); } catch {} r(); }, 10000)),
+        ]).catch(() => {});
+      }
     }
   }
 }
