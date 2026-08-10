@@ -16,6 +16,7 @@ export class InstagramSavedProvider implements VaultProvider {
   private async launchBrowser(ctx: ProviderContext, cookies?: string): Promise<{ browser: Browser; page: Page }> {
     const browser = await puppeteer.launch({
       headless: true,
+      executablePath: process.env.CHROME_PATH || undefined,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     }) as Browser;
     const cookieStr = cookies || (ctx.config.cookies as string) || '';
