@@ -127,12 +127,11 @@ export class InstagramSavedProvider implements VaultProvider {
     return { username, userId };
   }
 
-  private async fetchItems(page: Page, username: string, skipIds?: string[], endCursor?: string | null): Promise<{ items: InstagramItem[]; endCursor: string | null; hasNextPage: boolean }> {
-    let allItems: InstagramItem[] = [];
-    let nextCursor: string | null = null;
-    let hasNext = false;
-
+  private async collectItems(page: Page, username: string, maxItems = 100): Promise<InstagramItem[]> {
+    const allItems: InstagramItem[] = [];
+    const seenIds = new Set<string>();
     const savedUrl = `https://www.instagram.com/${username}/saved/all-posts/`;
+
     const handler = async (res: HTTPResponse) => {
       const url = res.url();
       try {
@@ -140,15 +139,13 @@ export class InstagramSavedProvider implements VaultProvider {
           const text = await res.text();
           const parsed = JSON.parse(text) as SavedPostsApiResponse;
           if (parsed?.items?.length) {
-            const { items, hasMore } = parseSavedPostsResponse(parsed, username);
+            const { items } = parseSavedPostsResponse(parsed, username);
             for (const item of items) {
-              if (!allItems.find(x => x.id === item.id)) allItems.push(item);
+              if (!seenIds.has(item.id)) { seenIds.add(item.id); allItems.push(item); }
             }
-            hasNext = hasMore;
           }
           return;
         }
-
         if (!url.includes('graphql') && !url.includes('api/graphql')) return;
         const text = await res.text();
         let parsed: NewApiResponse | null = null;
@@ -157,36 +154,35 @@ export class InstagramSavedProvider implements VaultProvider {
           if (match) { try { parsed = JSON.parse(match[1]); } catch (_e2) { /* */ } }
         }
         if (!parsed) return;
-
-        const { items, endCursor: ec, hasNextPage: hp } = parseApiResponse(parsed, username);
-        if (items.length > 0) {
-          for (const item of items) {
-            if (!allItems.find(x => x.id === item.id)) allItems.push(item);
-          }
-          if (ec) nextCursor = ec;
-          if (hp) hasNext = hp;
+        const { items } = parseApiResponse(parsed, username);
+        for (const item of items) {
+          if (!seenIds.has(item.id)) { seenIds.add(item.id); allItems.push(item); }
         }
       } catch (_e) { /* */ }
     };
 
     page.on('response', handler);
     try {
-      const navigateUrl = endCursor ? `${savedUrl}?max_id=${endCursor}` : savedUrl;
       try {
-        await page.goto(navigateUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-      } catch (_navErr) {
-        console.log('[instagram] fetchItems: navigation ended (possibly no more pages)');
-      }
-      for (let i = 0; i < 30 && allItems.length === 0; i++) {
+        await page.goto(savedUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+      } catch (_navErr) { /* */ }
+      for (let i = 0; i < 15 && allItems.length === 0; i++) {
         await new Promise<void>(r => setTimeout(r, 1000));
       }
+      while (allItems.length < maxItems) {
+        const prevCount = allItems.length;
+        await page.evaluate(() => window.scrollBy(0, window.innerHeight * 3));
+        await new Promise<void>(r => setTimeout(r, 3000));
+        for (let i = 0; i < 5 && allItems.length === prevCount; i++) {
+          await new Promise<void>(r => setTimeout(r, 1000));
+        }
+        if (allItems.length === prevCount) break;
+      }
+      console.log(`[instagram] collectItems: ${allItems.length} items collected`);
+      return allItems.slice(0, maxItems);
     } finally {
       page.off('response', handler);
     }
-
-    const filtered = allItems.filter(item => !skipIds || skipIds.indexOf(item.id) < 0);
-    console.log(`[instagram] fetchItems: ${allItems.length} total, ${filtered.length} after filter`);
-    return { items: filtered, endCursor: nextCursor, hasNextPage: hasNext };
   }
 
   async executeTask(ctx: ProviderContext): Promise<TaskResult> {
@@ -211,9 +207,6 @@ export class InstagramSavedProvider implements VaultProvider {
 
       const handle = userId;
 
-      let downloaded = 0, failed = 0;
-      const skipIds: string[] = [];
-
       const handleUnsave = async (item: InstagramItem) => {
         const actionPage = await browser!.newPage();
         let ok = false;
@@ -229,11 +222,19 @@ export class InstagramSavedProvider implements VaultProvider {
         }
       };
 
-      const processItem = async (item: InstagramItem): Promise<void> => {
-        skipIds.push(item.id);
+      // Phase 1: Collect items
+      const items = await this.collectItems(page, handle);
+      await page.close().catch(() => {});
+      page = null;
+      ctx.addLog('info', `Collected ${items.length} items`);
+
+      // Phase 2: Download all items
+      let downloaded = 0, failed = 0;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         if (ctx.hasSuccessfulDownloadRecord(item.id)) {
           if (item.bookmarked) await handleUnsave(item);
-          return;
+          continue;
         }
         const mediaUrls = getMediaUrls(item);
         if (mediaUrls.length === 0) {
@@ -245,7 +246,7 @@ export class InstagramSavedProvider implements VaultProvider {
             dataJson: { detailUrl: item.detailUrl, raw: item.raw }
           });
           if (item.bookmarked) await handleUnsave(item);
-          return;
+          continue;
         }
         try {
           const files: DownloadFile[] = [];
@@ -264,9 +265,13 @@ export class InstagramSavedProvider implements VaultProvider {
           for (const dl of mediaUrls) {
             for (const url of dl.urls) {
               try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 30000);
                 const response = await fetch(url, {
                   headers: { 'Cookie': cookies, 'Referer': 'https://www.instagram.com/' },
+                  signal: controller.signal,
                 });
+                clearTimeout(timeout);
                 if (response.ok) {
                   const buffer = await response.arrayBuffer();
                   const dest = ctx.path.join(userDir, dl.filename);
@@ -282,7 +287,9 @@ export class InstagramSavedProvider implements VaultProvider {
                   }
                   break;
                 }
-              } catch (_e) { /* retry next url */ }
+              } catch (e) {
+                ctx.addLog('warn', `Download error for ${dl.filename}: ${(e as Error).message?.slice(0, 80)}`);
+              }
             }
           }
 
@@ -299,7 +306,6 @@ export class InstagramSavedProvider implements VaultProvider {
             failed++;
           }
         } catch (err) {
-          console.error('[instagram] download error:', (err as Error).message);
           ctx.addLog('error', `Download error: ${item.id} - ${(err as Error).message}`);
           ctx.addDownloadRecord({
             id: item.id, author: item.author, authorId: item.authorId, desc: item.desc,
@@ -308,32 +314,7 @@ export class InstagramSavedProvider implements VaultProvider {
           });
           failed++;
         }
-      };
-
-      try {
-        let endCursor: string | null = null;
-        let maxRequestCount = 20;
-        let processedCount = 0;
-
-        do {
-          const fetched = await this.fetchItems(page, handle, skipIds, endCursor);
-          maxRequestCount--;
-          endCursor = fetched.endCursor;
-          for (const item of fetched.items) {
-            await processItem(item);
-          }
-          processedCount += fetched.items.length;
-          ctx.emitTaskProgress(processedCount, processedCount);
-          if (fetched.items.length > 0) {
-            await new Promise<void>(r => setTimeout(r, 3000));
-          }
-        } while (endCursor && maxRequestCount > 0);
-      } catch (err) {
-        ctx.addLog('error', `Instagram task error: ${(err as Error).message}`);
-        return { state: TaskState.Error, message: (err as Error).message, downloaded: 0, failed: 0, total: 0, duration: Date.now() - startTime };
-      } finally {
-        if (page) await page.close().catch(() => {});
-        if (browser) await browser.close().catch(() => {});
+        ctx.emitTaskProgress(i + 1, items.length);
       }
 
       return {
