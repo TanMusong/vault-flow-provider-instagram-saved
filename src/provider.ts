@@ -57,34 +57,8 @@ export class InstagramSavedProvider implements VaultProvider {
     if (!cookies) {
       return { success: false, message: this.msg(ctx.locale, 'cookie_required', 'Cookies are required') };
     }
-
-    let browser: Browser | null = null;
-    let page: Page | null = null;
-    try {
-      const launched = await this.launchBrowser(ctx, cookies);
-      browser = launched.browser;
-      page = launched.page;
-
-      const result = await this.checkLogin(page);
-      if (!result.username) {
-        return { success: false, message: this.msg(ctx.locale, 'login_failed', 'Invalid cookies or login failed') };
-      }
-
-      return {
-        success: true,
-        name: result.username,
-      };
-    } catch (err) {
-      return { success: false, message: (err as Error).message };
-    } finally {
-      if (page) await page.close().catch(() => {});
-      if (browser) {
-        await Promise.race([
-          browser.close(),
-          new Promise<void>(r => setTimeout(() => { try { (browser as any).process()?.kill(); } catch {} r(); }, 10000)),
-        ]).catch(() => {});
-      }
-    }
+    const taskName = (ctx.config.taskName as string) || `Task-${new Date().toISOString().slice(0, 10)}`;
+    return { success: true, name: taskName };
   }
 
   async deleteTask(ctx: ProviderContext, taskId: string): Promise<DeleteTaskResult | TaskErrorResult> {
