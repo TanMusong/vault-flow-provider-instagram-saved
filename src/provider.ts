@@ -21,6 +21,13 @@ function sanitizeDirName(name: string): string {
 export class InstagramSavedProvider implements VaultProvider {
   constructor() {}
 
+  private parseCookies(cookies: string, domain: string): { name: string; value: string; domain: string; path: string }[] {
+    return cookies.split(';').map(c => c.trim()).filter(Boolean).map(pair => {
+      const [name, ...valueParts] = pair.split('=');
+      return { name: name.trim(), value: valueParts.join('=').trim(), domain, path: '/' };
+    }).filter(c => c.name && c.value);
+  }
+
   private async launchBrowser(ctx: ProviderContext, cookies?: string): Promise<{ browser: Browser; page: Page }> {
     const browser = await puppeteer.launch({
       headless: true,
@@ -28,17 +35,9 @@ export class InstagramSavedProvider implements VaultProvider {
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     }) as Browser;
     const cookieStr = cookies || (ctx.config.cookies as string) || '';
+    const puppeteerCookies = this.parseCookies(cookieStr, '.instagram.com');
+    if (puppeteerCookies.length > 0) await browser.setCookie(...puppeteerCookies);
     const page = await browser.newPage();
-    if (cookieStr) {
-      const cookiePairs = cookieStr.split(';').map(c => c.trim()).filter(Boolean);
-      const cookieObjects = cookiePairs.map(pair => {
-        const [name, ...valueParts] = pair.split('=');
-        return { name: name.trim(), value: valueParts.join('='), domain: '.instagram.com', path: '/' };
-      }).filter(c => c.name);
-      if (cookieObjects.length > 0) {
-        await page.setCookie(...cookieObjects);
-      }
-    }
     return { browser, page };
   }
 
@@ -311,13 +310,10 @@ export class InstagramSavedProvider implements VaultProvider {
 
       // Refresh cookies after task execution
       try {
-        if (page) {
-          const p = page as Page;
-          const currentCookies = await p.cookies();
-          const cookieStr = currentCookies.map((c: any) => `${c.name}=${c.value}`).join('; ');
-          if (cookieStr) {
-            ctx.saveConfig({ ...ctx.config, cookies: cookieStr });
-          }
+        const currentCookies = await browser!.cookies();
+        const cookieStr = currentCookies.map((c: any) => `${c.name}=${c.value}`).join('; ');
+        if (cookieStr) {
+          ctx.saveConfig({ ...ctx.config, cookies: cookieStr });
         }
       } catch (_e) { /* ignore cookie refresh errors */ }
 
